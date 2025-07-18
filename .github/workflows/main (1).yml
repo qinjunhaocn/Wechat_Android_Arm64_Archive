@@ -1,0 +1,75 @@
+name: Update WeChat Latest APK
+
+on:
+  workflow_dispatch:          # 手动触发
+  schedule:
+    - cron: '0 8 * * *'       # 每天 08:00 UTC 跑一次，可按需调整
+
+permissions:
+  contents: write             # 需要写仓库 & 创建 Release
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. 拉仓库（方便拿旧包）
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # 2. 下载官网最新 APK
+      - name: Download latest WeChat APK
+        id: download
+        run: |
+          set -e
+          APK_URL=$(wget -qO- https://weixin.qq.com/ | grep -oP 'https://dldir[^"]*apk' | head -n1)
+          echo "APK_URL=$APK_URL" >> $GITHUB_OUTPUT
+          wget "$APK_URL" -O new.apk
+          echo "NEW_SHA=$(sha256sum new.apk | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "ORIG_NAME=$(basename "$APK_URL")" >> $GITHUB_OUTPUT
+
+      # 3. 下载仓库里最新的 wechat_latest.apk（如果存在）
+      - name: Fetch current Release asset
+        id: fetch
+        run: |
+          set -e
+          LATEST_TAG=$(gh release list --limit 1 --json tagName -q '.[0].tagName' || true)
+          if [[ -n "$LATEST_TAG" ]]; then
+            gh release download "$LATEST_TAG" -p wechat_latest.apk || true
+          fi
+          if [[ -f wechat_latest.apk ]]; then
+            echo "OLD_SHA=$(sha256sum wechat_latest.apk | awk '{print $1}')" >> $GITHUB_OUTPUT
+          else
+            echo "OLD_SHA=" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # 4. 比对哈希
+      - name: Compare SHA256
+        id: cmp
+        run: |
+          if [[ "${{ steps.download.outputs.NEW_SHA }}" == "${{ steps.fetch.outputs.OLD_SHA }}" ]]; then
+            echo "UPLOAD=false" >> $GITHUB_OUTPUT
+          else
+            echo "UPLOAD=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create new Release
+        if: steps.cmp.outputs.UPLOAD == 'true'
+        run: |
+          set -e
+          # 1. 提前提取版本号
+          ORIG="${{ steps.download.outputs.ORIG_NAME }}"
+          VERSION=$(echo "$ORIG" | sed -nE 's/.*we(chat|ixin)([0-9]+).*/\2/p')
+          [[ -z "$VERSION" ]] && VERSION="latest"
+
+          # 2. 改名
+          mv new.apk wechat_latest.apk
+
+          # 3. 创建 Release
+          gh release create "$VERSION" \
+            --title "$VERSION" \
+            --notes "Auto-updated WeChat Android APK from $(date -u +%F)" \
+            wechat_latest.apk
+        env:
+          GH_TOKEN: ${{ github.token }}
